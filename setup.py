@@ -34,6 +34,8 @@ setup(
         'umap-learn',
         'vocos[train]',
         'yapecs',
+        'espnet',
+        'espnet_model_zoo',
     ],
     packages=find_packages(),
     package_data={'promonet': ['assets/*', 'assets/*/*', 'assets/*/*/*']},

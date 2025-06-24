@@ -86,9 +86,23 @@ def from_audio(
 
     # Infer ppg
     if 'ppg' in features:
-        ppg = ppgs.from_audio(audio, sample_rate, gpu=gpu)
-
-        # Resample
+        # --- 置き換え開始 ---
+        from espnet2.bin.asr_inference import Speech2Text
+    
+        speech2text = Speech2Text.from_pretrained(
+            model_tag="kan-bayashi/jsut_asr_train_asr_transformer_raw_char_sp",
+            device="cuda" if gpu else "cpu"
+        )
+    
+        waveform = audio.unsqueeze(0) if isinstance(audio, torch.Tensor) else torch.from_numpy(audio).unsqueeze(0)
+        feats = speech2text.frontend(waveform)[0]
+        with torch.no_grad():
+            encoded = speech2text.asr_model.encode(feats.unsqueeze(0))
+            logits = encoded.squeeze(0).transpose(0, 1)
+            ppg = torch.softmax(logits, dim=0)
+        # --- 置き換え終了 ---
+    
+        # Resample & normalize
         length = promonet.convert.samples_to_frames(
             torchaudio.functional.resample(
                 audio.shape[-1],
@@ -98,10 +112,9 @@ def from_audio(
             ppg,
             promonet.edit.grid.of_length(ppg, length),
             promonet.PPG_INTERP_METHOD)
-
-        # Preserve distribution
+    
         result.append(torch.softmax(torch.log(ppg + 1e-8), -2))
-
+    
     # Infer transcript
     if 'text' in features:
         text = promonet.preprocess.text.from_audio(audio, sample_rate, gpu=gpu)

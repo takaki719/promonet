@@ -21,6 +21,34 @@ MODEL_ID = "openai/whisper-large-v3"
 ###############################################################################
 
 
+import re
+import unicodedata
+import jaconv
+
+class JapaneseTextNormalizer:
+    """
+    日本語のWER/CER評価用に、表記ゆれを整える正規化クラス
+    """
+    def __call__(self, text: str) -> str:
+        # 全角→半角統一（英数字・記号など）
+        text = unicodedata.normalize("NFKC", text)
+
+        # 記号・句読点などを削除
+        text = re.sub(r'[！!？?。、・（）「」『』【】［］〈〉《》―ー‐\-~"\'’‘“”=＋*･／/\\|‥#@※￥$%♯☆★◎〇×→←↑↓…‥]', '', text)
+
+        # 数字を除去（または将来的に漢数字へ変換）
+        text = re.sub(r'\d+', '', text)
+
+        # カタカナ→ひらがな（音で比較しやすく）
+        text = jaconv.kata2hira(text)
+
+        # 空白・タブ・全角スペース削除
+        text = re.sub(r'\s+', '', text)
+
+        return text
+    
+
+
 def from_audio(audio, sample_rate=promonet.SAMPLE_RATE, gpu=None):
     """Perform ASR from audio"""
     device = f'cuda:{gpu}' if gpu is not None else 'cpu'
@@ -83,6 +111,11 @@ def infer(audio, gpu=None):
             use_safetensors=True,
         ).to(device)
         processor = AutoProcessor.from_pretrained(MODEL_ID)
+
+        #japanese ASR requires forced decoder ids
+        forced_decoder_ids = processor.get_decoder_prompt_ids(language="japanese", task="transcribe")
+        model.config.forced_decoder_ids = forced_decoder_ids
+        
         infer.pipe = pipeline(
             "automatic-speech-recognition",
             model=model,
@@ -93,14 +126,17 @@ def infer(audio, gpu=None):
             batch_size=64,
             return_timestamps=False,
             torch_dtype=torch.float16,
-            device=device)
+            device=device,
+            generate_kwargs={
+            "language": "ja",
+            })
         infer.device = device
 
     return infer.pipe(audio)
 
 
 def lint(text):
-    """Formats text to only words for use in WER"""
+    """日本語WER/CER評価用にテキストを整形する"""
     if not hasattr(lint, 'normalizer'):
-        lint.normalizer = EnglishTextNormalizer()
-    return lint.normalizer(text).lower()
+        lint.normalizer = JapaneseTextNormalizer()
+    return lint.normalizer(text)
