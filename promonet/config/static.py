@@ -62,6 +62,8 @@ elif promonet.TRAINING_DATASET == 'libritts':
     NUM_SPEAKERS = 1230
 elif promonet.TRAINING_DATASET == 'vctk':
     NUM_SPEAKERS = 109
+elif promonet.TRAINING_DATASET == 'jsut':
+    NUM_SPEAKERS = 1
 else:
     raise ValueError(f'Dataset {promonet.TRAINING_DATASET} is not defined')
 
