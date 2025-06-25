@@ -18,3 +18,4 @@ notebooks/*
 !notebooks/*.ipynb
 
 .vscode/
+.venv/

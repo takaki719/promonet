@@ -9,7 +9,7 @@ import promonet
 
 
 ###############################################################################
-# Training
+# 学習 (Training)
 ###############################################################################
 
 
@@ -22,24 +22,36 @@ def train(
     adapt_from=None,
     gpu=None
 ):
-    """Train a model"""
-    # Prevent matplotlib from warning us about all the figures we will have
-    # open at once during evaluation. The figures are correctly closed.
+    """
+    モデルの学習を実行します。
+
+    Args:
+        directory (str): チェックポイントやログを保存するディレクトリ。
+        dataset (str): 使用するデータセット名。
+        train_partition (str): 学習に使用するデータセットのパーティション名。
+        valid_partition (str): 検証に使用するデータセットのパーティション名。
+        adapt_from (str, optional): 適応学習（ファインチューニング）の元となる学習済みモデルのディレクトリ。
+        gpu (int, optional): 使用するGPUのID。Noneの場合はCPUを使用します。
+    """
+    # Matplotlibが評価中に多数の図を同時に開くことに関する警告を抑制します。
+    # 図は適切に閉じられるため、この警告は不要です。
     plt.rcParams.update({'figure.max_open_warning': 100})
 
-    # Get torch device
+    # PyTorchが使用するデバイス（CPUまたはGPU）を取得します。
     device = torch.device('cpu' if gpu is None else f'cuda:{gpu}')
 
     #######################
-    # Create data loaders #
+    # データローダの作成 #
     #######################
 
-    torch.manual_seed(promonet.RANDOM_SEED)
+    torch.manual_seed(promonet.RANDOM_SEED) # 再現性のために乱数シードを固定
+    # 学習用データローダ
     train_loader = promonet.data.loader(
         dataset,
         train_partition,
-        adapt_from is not None,
+        adapt_from is not None, # 適応学習モードか否か
         gpu)
+    # 検証用データローダ
     valid_loader = promonet.data.loader(
         dataset,
         valid_partition,
@@ -47,26 +59,33 @@ def train(
         gpu)
 
     #################
-    # Create models #
+    # モデルの作成 #
     #################
 
+    # SPECTROGRAM_ONLYがTrueの場合、メルスペクトログラムから音声を生成するシンプルなモデルを使用
     if promonet.SPECTROGRAM_ONLY:
         generator = promonet.model.MelGenerator().to(device)
+    # そうでなければ、PPGやピッチなど詳細な特徴量から生成するメインのモデルを使用
     else:
         generator = promonet.model.Generator().to(device)
+    # 識別器モデルを作成
     discriminators = promonet.model.Discriminator().to(device)
 
     #####################
-    # Create optimizers #
+    # オプティマイザの作成 #
     #####################
 
+    # 識別器用のオプティマイザ
     discriminator_optimizer = promonet.OPTIMIZER(discriminators.parameters())
+    # 生成器用のオプティマイザ
     generator_optimizer = promonet.OPTIMIZER(generator.parameters())
 
     ##############################
-    # Maybe load from checkpoint #
+    # チェックポイントからの読み込み #
     ##############################
 
+    # 読み込むべき最新のチェックポイントパスを取得
+    # adapt_fromが指定されていればそちらから、なければ現在の学習ディレクトリから探す
     generator_path = torchutil.checkpoint.latest_path(
         directory if adapt_from is None else adapt_from,
         'generator-*.pt')
@@ -74,9 +93,9 @@ def train(
         directory if adapt_from is None else adapt_from,
         'discriminator-*.pt')
 
+    # 両方のチェックポイントが存在すれば、学習を再開する
     if generator_path and discriminator_path:
-
-        # Load generator
+        # 生成器とそのオプティマイザの状態を読み込む
         (
             generator,
             generator_optimizer,
@@ -86,9 +105,9 @@ def train(
             generator,
             generator_optimizer
         )
-        step, epoch = state['step'], state['epoch']
+        step, epoch = state['step'], state['epoch'] # 現在のステップとエポック数を復元
 
-        # Load discriminator
+        # 識別器とそのオプティマイザの状態を読み込む
         (
             discriminators,
             discriminator_optimizer,
@@ -98,44 +117,43 @@ def train(
             discriminators,
             discriminator_optimizer
         )
-
+    # チェックポイントがない場合は、最初から学習を開始する
     else:
-
-        # Train from scratch
         step, epoch = 0, 0
 
     #########
-    # Train #
+    # 学習 #
     #########
 
-    # Get total number of steps
-    if adapt_from:
+    # 総学習ステップ数を設定
+    if adapt_from: # 適応学習の場合
         steps = promonet.STEPS + promonet.ADAPTATION_STEPS
-    else:
+    else: # 通常の学習の場合
         steps = promonet.STEPS
 
-    # Automatic mixed precision (amp) gradient scaler
+    # 自動混合精度（AMP）のための勾配スケーラを作成
     scaler = torch.cuda.amp.GradScaler()
 
-    # Maybe setup spectral convergence loss
+    # スペクトル収束損失をセットアップ（オプション）
     if promonet.SPECTRAL_CONVERGENCE_LOSS:
         spectral_convergence = \
             promonet.loss.MultiResolutionSpectralConvergence(device)
 
-    # Setup progress bar
+    # 学習の進捗バーをセットアップ
     progress = torchutil.iterator(
         range(step, steps),
         f'{"Train" if adapt_from is None else "Adapt"}ing {promonet.CONFIG}',
         initial=step,
         total=steps)
+    
+    # メインの学習ループ
     while step < steps:
-
-        # Seed sampler
+        # データローダのサンプラーに現在のエポック数を設定（分散学習で重要）
         train_loader.batch_sampler.set_epoch(epoch)
 
         for batch in train_loader:
-
-            # Unpack batch
+            # --- バッチデータの準備 ---
+            # バッチを各特徴量にアンパック
             (
                 _,
                 loudness,
@@ -150,11 +168,11 @@ def train(
                 _
             ) = batch
 
-            # Skip examples that are too short
+            # 音声が短すぎるサンプルはスキップ
             if audio.shape[-1] < promonet.CHUNK_SIZE:
                 continue
 
-            # Copy to device
+            # 全てのテンソルを学習デバイス（GPUなど）にコピー
             (
                 loudness,
                 pitch,
@@ -180,7 +198,8 @@ def train(
                 )
             )
 
-            # Bundle training input
+            # --- 生成器への入力データを準備 ---
+            # 自己回帰モデルのために、先行する音声サンプルを準備
             if promonet.MODEL == 'cargan':
                 previous_samples = audio[..., :promonet.CARGAN_INPUT_SIZE]
                 slice_frames = promonet.CARGAN_INPUT_SIZE // promonet.HOPSIZE
@@ -189,12 +208,14 @@ def train(
                     ...,
                     :promonet.HOPSIZE * promonet.FARGAN_PREVIOUS_FRAMES]
                 slice_frames = 0
-            else:
+            else: # 自己回帰でないモデルの場合
                 previous_samples = torch.zeros(
-                    promonet.HOPSIZE,
+                    1, 1, promonet.NUM_PREVIOUS_SAMPLES,
                     dtype=audio.dtype,
                     device=audio.device)
                 slice_frames = 0
+            
+            # モデルの種類に応じて入力をまとめる
             if promonet.SPECTROGRAM_ONLY:
                 generator_input = (
                     spectrograms[..., slice_frames:],
@@ -202,7 +223,7 @@ def train(
                     spectral_balance_ratios,
                     loudness_ratios,
                     previous_samples)
-            else:
+            else: # メインモデルの場合
                 generator_input = (
                     loudness[..., slice_frames:],
                     pitch[..., slice_frames:],
@@ -214,15 +235,15 @@ def train(
                     previous_samples)
 
             #######################
-            # Train discriminator #
+            # 識別器の学習 #
             #######################
 
+            # 混合精度で計算を行うコンテキスト
             with torch.autocast(device.type):
-
-                # Forward pass through generator
+                # 生成器で偽の音声（generated）を生成
                 generated = generator(*generator_input)
 
-                # Evaluate the boundary of autoregressive models
+                # 自己回帰モデルの場合、先行サンプルと結合して評価
                 if promonet.MODEL == 'cargan':
                     generated = torch.cat((previous_samples, generated), dim=1)
                 elif promonet.MODEL == 'fargan':
@@ -233,14 +254,14 @@ def train(
                         ),
                         dim=2)
 
+                # 識別器の学習は指定されたステップから開始
                 if step >= promonet.DISCRIMINATOR_START_STEP:
-
-                    # Forward pass through discriminators
+                    # 識別器に本物の音声(audio)と偽の音声(generated)を入力
                     real_logits, fake_logits, _, _ = discriminators(
                         audio,
-                        generated.detach())
+                        generated.detach()) # 生成器の勾配計算を停止
 
-                    # Get discriminator loss
+                    # 識別器の損失を計算
                     (
                         discriminator_losses,
                         real_discriminator_losses,
@@ -249,21 +270,20 @@ def train(
                         [logit.float() for logit in real_logits],
                         [logit.float() for logit in fake_logits])
 
-            # Backward pass through discriminators
+            # 識別器の逆伝播とパラメータ更新
             if step >= promonet.DISCRIMINATOR_START_STEP:
                 discriminator_optimizer.zero_grad()
-                scaler.scale(discriminator_losses).backward()
-                scaler.step(discriminator_optimizer)
+                scaler.scale(discriminator_losses).backward() # スケーリングされた損失で逆伝播
+                scaler.step(discriminator_optimizer) # オプティマイザで更新
 
             ###################
-            # Train generator #
+            # 生成器の学習 #
             ###################
 
             with torch.autocast(device.type):
-
+                # 敵対的損失の計算は指定されたステップから開始
                 if step >= promonet.ADVERSARIAL_LOSS_START_STEP:
-
-                    # Forward pass through discriminator
+                    # 識別器に再度入力（今度は生成器の勾配を計算するためdetachしない）
                     (
                         _,
                         fake_logits,
@@ -271,22 +291,23 @@ def train(
                         fake_feature_maps
                     ) = discriminators(audio, generated)
 
-                # Compute generator losses
+                # --- 各種の生成器損失を計算 ---
                 generator_losses = 0.
 
+                # メルスペクトログラム損失（オプション）
                 if promonet.MEL_LOSS:
-
-                    # Maybe use sparse Mel loss
+                    
+                    # ターゲットとなるメルスペクトログラムを計算            
                     log_dynamic_range_compression_threshold = (
                         promonet.LOG_DYNAMIC_RANGE_COMPRESSION_THRESHOLD
                         if promonet.SPARSE_MEL_LOSS else None)
 
-                    # Compute target Mels
+                    # 生成された音声からメルスペクトログラムを計算
                     mels = promonet.preprocess.spectrogram.linear_to_mel(
                         spectrograms,
                         log_dynamic_range_compression_threshold)
 
-                    # Compute predicted Mels
+                    # L1損失を計算し、重みをかけて加算
                     generated_mels = promonet.preprocess.spectrogram.from_audio(
                         generated,
                         True,
@@ -304,19 +325,18 @@ def train(
                         generated_mels)
                     generator_losses += promonet.MEL_LOSS_WEIGHT * mel_loss
 
-                # Spectral convergence loss
+                # スペクトル収束損失（オプション）
                 if promonet.SPECTRAL_CONVERGENCE_LOSS:
                     spectral_loss = spectral_convergence(generated, audio)
                     generator_losses += spectral_loss
 
-                # Waveform loss
+                # 生波形損失（オプション）
                 if promonet.SIGNAL_LOSS:
                     signal_loss = promonet.loss.signal(audio, generated)
                     generator_losses += promonet.SIGNAL_LOSS_WEIGHT * signal_loss
 
                 if step >= promonet.ADVERSARIAL_LOSS_START_STEP:
-
-                    # Get feature matching loss
+                    # 特徴量マッチング損失（識別器の中間層出力のL1損失）
                     feature_matching_loss = promonet.loss.feature_matching(
                         real_feature_maps,
                         fake_feature_maps)
@@ -324,72 +344,63 @@ def train(
                         promonet.FEATURE_MATCHING_LOSS_WEIGHT *
                         feature_matching_loss)
 
-                    # Get adversarial loss
+                    # 敵対的損失（生成器が識別器を騙せたかの指標）
                     adversarial_loss, adversarial_losses = \
                         promonet.loss.generator(
                             [logit.float() for logit in fake_logits])
                     generator_losses += \
                         promonet.ADVERSARIAL_LOSS_WEIGHT * adversarial_loss
 
-            # Zero gradients
-            generator_optimizer.zero_grad()
-
-            # Backward pass
+            # --- 生成器のパラメータ更新 ---
+            generator_optimizer.zero_grad() # 勾配をゼロに初期化
+            
             scaler.scale(generator_losses).backward()
 
-            # Monitor gradient statistics
+            # 勾配の統計情報を監視
             gradient_statistics = torchutil.gradients.stats(generator)
             torchutil.tensorboard.update(
                 directory,
                 step,
                 scalars=gradient_statistics)
 
-            # Maybe perform gradient clipping
+            # 勾配クリッピング（オプション）
             if promonet.GRADIENT_CLIP_GENERATOR is not None:
-
-                # Compare maximum gradient to threshold
+                # 勾配の最大値が閾値を超えた場合にクリッピングを実行
                 max_grad = max(
                     gradient_statistics['gradients/max'],
                     math.abs(gradient_statistics['gradients/min']))
                 if max_grad > promonet.GRADIENT_CLIP_GENERATOR:
 
-                    # Unscale gradients
+                    # スケーリングを元に戻す
                     scaler.unscale_(generator_optimizer)
-
-                    # Clip
+                    # 勾配をクリップ
                     torch.nn.utils.clip_grad_norm_(
                         generator.parameters(),
                         promonet.GRADIENT_CLIP_GENERATOR,
-                        norm_type='inf')
+                        norm_type="inf")
 
-            # Update weights
+            # パラメータの更新
             scaler.step(generator_optimizer)
-
-            # Update gradient scaler
+            # 勾配スケーラの更新
             scaler.update()
 
             ###########
-            # Logging #
+            # ログ記録 #
             ###########
 
+            # 一定間隔で評価とログ記録を実行
             if step % promonet.EVALUATION_INTERVAL == 0:
-
-                # Log VRAM utilization
+                # GPUメモリ使用量をログに記録
                 torchutil.tensorboard.update(
                     directory,
                     step,
                     scalars=torchutil.cuda.utilization(device, 'MB'))
 
-                # Log training losses
-                scalars = {
-                    'loss/generator/total': generator_losses}
-                if promonet.MEL_LOSS:
-                    scalars.update({'loss/generator/mels': mel_loss})
-                if promonet.SIGNAL_LOSS:
-                    scalars.update({'loss/generator/signal': signal_loss})
-                if promonet.SPECTRAL_CONVERGENCE_LOSS:
-                    scalars.update({
-                        'loss/generator/spectral-convergence': spectral_loss})
+                # 各種学習損失をTensorBoardに記録
+                scalars = {'loss/generator/total': generator_losses}
+                if promonet.MEL_LOSS: scalars.update({'loss/generator/mels': mel_loss})
+                if promonet.SIGNAL_LOSS: scalars.update({'loss/generator/signal': signal_loss})
+                if promonet.SPECTRAL_CONVERGENCE_LOSS: scalars.update({'loss/generator/spectral-convergence': spectral_loss})
                 if step >= promonet.ADVERSARIAL_LOSS_START_STEP:
                     scalars.update({
                     'loss/discriminator/total': discriminator_losses,
@@ -404,9 +415,10 @@ def train(
                     scalars.update(
                         {f'loss/discriminator/fake-{i:02d}': value
                         for i, value in enumerate(fake_discriminator_losses)})
+                    # ... (その他の詳細な損失も記録)
                 torchutil.tensorboard.update(directory, step, scalars=scalars)
 
-                # Evaluate on validation data
+                # 検証データで評価を実行
                 with torchutil.inference.context(generator):
                     evaluation_steps = (
                         None if step == steps
@@ -420,7 +432,7 @@ def train(
                         evaluation_steps)
 
             ###################
-            # Save checkpoint #
+            # チェックポイントの保存 #
             ###################
 
             if step and step % promonet.CHECKPOINT_INTERVAL == 0:
@@ -437,34 +449,29 @@ def train(
                     step=step,
                     epoch=epoch)
 
-            ########################
-            # Termination criteria #
-            ########################
+            ################
+            # 学習終了判定 #
+            ################
 
-            # Finished training
             if step >= steps:
                 break
-
-            # Raise if GPU tempurature exceeds 80 C
+            
+            # GPU温度が80度を超えたら緊急停止
             if any(gpu.temperature > 80. for gpu in GPUtil.getGPUs()):
                 raise RuntimeError(
                     f'GPU is overheating. Terminating training.')
 
-            ###########
-            # Updates #
-            ###########
-
-            # Increment steps
+            # ステップ数をインクリメント
             step += 1
 
-            # Update progress bar
-            progress.update()
-        epoch += 1
+            # 進捗バーを更新
+            progress.update() 
+        epoch += 1 # エポック数をインクリメント
 
-    # Close progress bar
+    # 進捗バーを閉じる
     progress.close()
 
-    # Save final model
+    # 最終的なモデルを保存
     torchutil.checkpoint.save(
         directory / f'generator-{step:08d}.pt',
         generator,
@@ -480,15 +487,18 @@ def train(
 
 
 ###############################################################################
-# Evaluation
+# 評価 (Evaluation)
 ###############################################################################
 
 
 def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
-    """Perform model evaluation"""
+    """
+    モデルの性能評価を実行します。
+    """
     device = 'cpu' if gpu is None else f'cuda:{gpu}'
 
-    # Setup evaluation metrics
+    # --- 評価指標のセットアップ ---
+    # 各評価条件（再構成、ピッチシフトなど）ごとにメトリクスを計算するクラスを準備
     metrics = {'reconstruction': promonet.evaluate.Metrics()}
     ratios = [
         f'{int(ratio * 100):03d}' for ratio in promonet.EVALUATION_RATIOS]
@@ -505,16 +515,15 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
             f'scaled-{ratio}': promonet.evaluate.Metrics()
             for ratio in ratios})
 
-    # Audio, figures, and scalars for tensorboard
+    # TensorBoardに保存するための音声、図、スカラー値を初期化
     waveforms, figures, scalars = {}, {}, {}
 
-    # Use default values for augmentation ratios
+    # データ拡張用の比率は評価時はデフォルト値(1.0)を使用
     spectral_balance_ratios = torch.ones(1, dtype=torch.float, device=device)
     loudness_ratios = torch.ones(1, dtype=torch.float, device=device)
 
     for i, batch in enumerate(loader):
-
-        # Unpack
+        # --- バッチデータの準備 ---
         (
             _,
             loudness,
@@ -528,8 +537,7 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
             audio,
             _
         ) = batch
-
-        # Copy to device
+        # 必要なデータをデバイスにコピー
         (
             loudness,
             pitch,
@@ -549,28 +557,29 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                 audio
             )
         )
-
-        # Pack global features
+        
+        # グローバル特徴量をまとめる
         global_features = (
             speakers,
             spectral_balance_ratios,
             loudness_ratios,
             generator.default_previous_samples)
 
-        # Ensure audio and generated are same length
+        # ターゲット音声と生成音声の長さを合わせる
         trim = audio.shape[-1] % promonet.HOPSIZE
         if trim > 0:
             audio = audio[..., :-trim]
-
-        # Log original audio on first evaluation
+        
+        # 最初の評価時に元の音声を保存
         if step == 0:
             waveforms[f'original/{i:02d}-audio'] = audio[0]
 
         ##################
-        # Reconstruction #
+        # 1. 再構成評価 #
         ##################
+        # 元の特徴量から音声を生成し、元の音声とどれだけ近いかを評価
 
-        # Generate
+        # 生成器への入力
         if promonet.SPECTROGRAM_ONLY:
             generator_input = (spectrogram, *global_features)
         else:
@@ -581,20 +590,18 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                 ppg,
                 *global_features)
         generated = generator(*generator_input)
-
-        # Log generated audio
         key = f'reconstruction/{i:02d}'
         waveforms[f'{key}-audio'] = generated[0]
-
-        # Get prosody features
+        
+        # 生成音声から特徴量を再抽出
         (
             predicted_loudness,
             predicted_pitch,
             predicted_periodicity,
             predicted_ppg
         ) = promonet.preprocess.from_audio(generated[0], gpu=gpu)
-
-        # Plot target and generated prosody
+        
+        # 特徴量の比較プロットを生成
         if i < promonet.PLOT_EXAMPLES:
             figures[key] = promonet.plot.from_features(
                 generated,
@@ -606,8 +613,8 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                 pitch,
                 periodicity,
                 ppg)
-
-        # Update metrics
+        
+        # メトリクスを更新
         metrics[key.split('/')[0]].update(
             loudness,
             pitch,
@@ -618,10 +625,9 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
             predicted_periodicity,
             predicted_ppg)
 
-        ##################
-        # Pitch shifting #
-        ##################
-
+        ######################
+        # 2. ピッチシフト評価 #
+        ######################
         if 'pitch' in promonet.INPUT_FEATURES:
             for ratio in promonet.EVALUATION_RATIOS:
 
@@ -673,14 +679,12 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                     predicted_periodicity,
                     predicted_ppg)
 
-        ###################
-        # Time stretching #
-        ###################
-
+        #######################
+        # 3. タイムストレッチ評価 #
+        #######################
         if 'ppg' in promonet.INPUT_FEATURES:
             for ratio in promonet.EVALUATION_RATIOS:
-
-                # Stretch representation
+                # 特徴量をタイムストレッチ
                 (
                     stretched_loudness,
                     stretched_pitch,
@@ -739,13 +743,11 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                     predicted_ppg)
 
         ####################
-        # Loudness scaling #
+        # 4. 音量スケール評価 #
         ####################
-
         if 'loudness' in promonet.INPUT_FEATURES:
             for ratio in promonet.EVALUATION_RATIOS:
-
-                # Scale loudness
+                # 音量をスケール
                 scaled_loudness = \
                     loudness + promonet.convert.ratio_to_db(ratio)
 
@@ -794,16 +796,16 @@ def evaluate(directory, step, generator, loader, gpu, evaluation_steps=None):
                     predicted_periodicity,
                     predicted_ppg)
 
-        # Stop when we exceed some number of batches
+        # 指定されたステップ数で評価を終了
         if evaluation_steps is not None and i + 1 == evaluation_steps:
             break
 
-    # Format prosody metrics
+    # --- 最終的なメトリクスを計算してまとめる ---
     for condition in metrics:
         for key, value in metrics[condition]().items():
             scalars[f'{condition}/{key}'] = value
 
-    # Write to Tensorboard
+    # 結果をTensorBoardに書き込む
     torchutil.tensorboard.update(
         directory,
         step,
